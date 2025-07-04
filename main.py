@@ -5,8 +5,10 @@ import torch.nn.functional as F
 import torch.nn as nn
 from botorch.models import SingleTaskGP
 from botorch.optim import optimize_acqf
-from botorch.acquisition import ExpectedImprovement
+from botorch.acquisition import LogExpectedImprovement
 import random
+from matplotlib import pyplot as plt
+import numpy as np
 
 
 def fix_seed(seed: int = 42) -> None:
@@ -19,16 +21,13 @@ def fix_seed(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def load_fashion_mnist(batch_size: int = 128) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+def load_fashion_mnist() -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
     '''
     Loads the Fashion MNIST dataset.
 
-    Args:
-        batch_size (int): The batch size for the dataloader.
-
     Returns:
-        train_loader (torch.utils.data.DataLoader): The dataloader for the training set.
-        test_loader (torch.utils.data.DataLoader): The dataloader for the test set.
+        train_dataset (torch.utils.data.Dataset): The training set.
+        test_dataset (torch.utils.data.Dataset): The test set.
     '''
     transform = torchvision.transforms.Compose([
         torchvision.transforms.ToTensor(),
@@ -48,11 +47,8 @@ def load_fashion_mnist(batch_size: int = 128) -> tuple[torch.utils.data.DataLoad
         transform=transform,
         download=True,
     )
-
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    return train_loader, test_loader
+    
+    return train_dataset, test_dataset
 
 
 class ResNetLayer(nn.Module):
@@ -241,6 +237,83 @@ def train_model(model: nn.Module, train_loader: torch.utils.data.DataLoader, tes
     return test_loss
 
 
+def plot_bayesian_optimization(evaluations: list[tuple[float, float]], min_lr_log: float, max_lr_log: float) -> None:
+    '''
+    Plots the Bayesian optimization process, including all observations, the posterior mean, the uncertainty estimate, and the acquisition function.
+
+    Args:
+        evaluations (list[tuple[float, float]]): The evaluations of the function.
+    '''
+
+    # Convert evaluations to numpy arrays
+    X_obs_log = np.array([[np.log10(lr)] for lr, _ in evaluations])
+    Y_obs = np.array([loss for _, loss in evaluations])
+
+    # Scale X to unit cube [0, 1] for GP
+    X_obs_scaled = (X_obs_log - min_lr_log) / (max_lr_log - min_lr_log)
+
+    # Create grid of points for visualization
+    X_grid_log = np.linspace(min_lr_log, max_lr_log, 1000).reshape(-1, 1)
+    X_grid_scaled = (X_grid_log - min_lr_log) / (max_lr_log - min_lr_log)
+
+    # Convert to tensors for GP
+    X_tensor = torch.tensor(X_obs_scaled, dtype=torch.float64)
+    Y_tensor = torch.tensor(Y_obs, dtype=torch.float64).reshape(-1, 1)
+    
+    # Store original scale parameters for later transformation
+    y_mean = float(Y_tensor.mean())
+    y_std = float(Y_tensor.std()) if Y_tensor.std() > 0 else 1.0
+    
+    # Standardize Y values
+    Y_tensor_standardized = (Y_tensor - y_mean) / y_std
+
+    # Fit GP model
+    gp = SingleTaskGP(X_tensor, Y_tensor_standardized)
+
+    # Get posterior
+    X_grid_tensor = torch.tensor(X_grid_scaled, dtype=torch.float64)
+    with torch.no_grad():
+        posterior = gp.posterior(X_grid_tensor)
+        mu_standardized = posterior.mean.numpy()
+        std_standardized = posterior.variance.sqrt().numpy()
+
+    # Transform predictions back to original scale
+    mu = mu_standardized * y_std + y_mean
+    std = std_standardized * y_std
+
+    # Calculate acquisition function
+    EI = LogExpectedImprovement(gp, best_f=Y_tensor_standardized.min())
+    acquisition = EI(X_grid_tensor.reshape(-1, 1, 1)).detach().numpy()
+
+    # Create plot
+    fig, (ax_gp, ax_acq) = plt.subplots(
+        2, 1, figsize=(10, 6), sharex=True,
+        gridspec_kw={'height_ratios': [3, 1]}
+    )
+
+    # GP posterior plot
+    ax_gp.plot(X_grid_log, mu, 'k--', label='Prediction')
+    ax_gp.fill_between(
+        X_grid_log.ravel(),
+        mu.ravel() - 1.96 * std.ravel(),
+        mu.ravel() + 1.96 * std.ravel(),
+        color='turquoise', alpha=0.4, label='95% CI'
+    )
+    ax_gp.scatter(X_obs_log, Y_obs, c='red', s=40, zorder=3, label='Observations')
+    ax_gp.set_ylabel('Loss')
+    ax_gp.legend(loc='upper right')
+    ax_gp.set_title('Gaussian Process and Acquisition Function')
+
+    # Acquisition function plot
+    ax_acq.plot(X_grid_log, acquisition, color='purple', label='Utility Function')
+    ax_acq.set_xlabel('log10(Learning Rate)')
+    ax_acq.set_ylabel('Utility')
+    ax_acq.legend(loc='upper right')
+
+    plt.tight_layout()
+    plt.show()
+
+
 def sobol_sequence(n: int) -> list[float]:
     '''
     Generates a 1-dimensional Sobol sequence.
@@ -274,27 +347,33 @@ def get_next_guess(evaluations: list[tuple[float, float]]) -> float:
         next_guess (float): The next guess.
     '''
     # Convert evaluations to tensors for botorch
-    X = torch.tensor([[torch.log10(torch.tensor(lr))] for lr, _ in evaluations], dtype=torch.float64)
+    X_log = torch.tensor([[torch.log10(torch.tensor(lr))] for lr, _ in evaluations], dtype=torch.float64)
     y = torch.tensor([[loss] for _, loss in evaluations], dtype=torch.float64)
+
+    # Scale X to unit cube [0, 1]
+    min_lr_log, max_lr_log = -6, -2
+    X_scaled = (X_log - min_lr_log) / (max_lr_log - min_lr_log)
 
     # Standardize y values
     y = (y - y.mean()) / (y.std() if y.std() > 0 else 1.0)
 
     # Initialize GP model (using default parameters)
-    gp = SingleTaskGP(X, y)
+    gp = SingleTaskGP(X_scaled, y)
 
-    # Define acquisition function (Expected Improvement)
+    # Define acquisition function (Log Expected Improvement)
     best_f = y.min()
-    EI = ExpectedImprovement(gp, best_f=best_f)
+    EI = LogExpectedImprovement(gp, best_f=best_f)
 
-    # Optimize acquisition function
-    bounds = torch.tensor([[-6.0], [-2.0]], dtype=torch.float64)
+    # Optimize acquisition function (bounds in unit cube)
+    bounds = torch.tensor([[0.0], [1.0]], dtype=torch.float64)
     candidate, _ = optimize_acqf(
         EI, bounds=bounds,
         q=1, num_restarts=5, raw_samples=20,
     )
     
-    return 10 ** candidate.item()
+    # Convert back to learning rate scale
+    candidate_log = candidate.item() * (max_lr_log - min_lr_log) + min_lr_log
+    return 10 ** candidate_log
 
 
 def bayesian_lr_optimization(model_class: type[nn.Module], train_function: Callable[[nn.Module, torch.utils.data.DataLoader, torch.utils.data.DataLoader, int, float], float], train_loader: torch.utils.data.DataLoader, test_loader: torch.utils.data.DataLoader, epochs: int = 10, budget: int = 10) -> float:
@@ -329,6 +408,9 @@ def bayesian_lr_optimization(model_class: type[nn.Module], train_function: Calla
 
     # Get next guess using GP
     while len(evaluations) < budget:
+
+        plot_bayesian_optimization(evaluations, min_lr_log, max_lr_log)
+
         # Get next guess using GP
         next_guess = get_next_guess(evaluations)
 
@@ -343,9 +425,19 @@ def bayesian_lr_optimization(model_class: type[nn.Module], train_function: Calla
 if __name__ == "__main__":
     # Load data
     print("Loading data...")
-    train_loader, test_loader = load_fashion_mnist()
+    train_dataset_full, test_dataset = load_fashion_mnist()
+    train_dataset, train_dataset_val = torch.utils.data.random_split(train_dataset_full, [0.8, 0.2])
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+    train_loader_val = torch.utils.data.DataLoader(train_dataset_val, batch_size=128, shuffle=False)
+    train_loader_full = torch.utils.data.DataLoader(train_dataset_full, batch_size=128, shuffle=True)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False)
 
     # Optimize learning rate
     print("Optimizing learning rate...")
-    best_lr = bayesian_lr_optimization(ResNet, train_model, train_loader, test_loader, epochs=10, budget=10)
+    best_lr = bayesian_lr_optimization(ResNet, train_model, train_loader, train_loader_val, epochs=10, budget=10)
     print(f"Best learning rate: {best_lr}")
+
+    # Train model with best learning rate on full training set
+    print("Training model with best learning rate on full training set...")
+    model = ResNet()
+    result_loss = train_model(model, train_loader_full, test_loader, epochs=10, learning_rate=best_lr)
