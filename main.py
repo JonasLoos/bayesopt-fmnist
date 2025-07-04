@@ -3,6 +3,7 @@ import torch
 import torchvision
 import torch.nn.functional as F
 import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader, random_split
 from botorch.models import SingleTaskGP
 from botorch.optim import optimize_acqf
 from botorch.acquisition import LogExpectedImprovement
@@ -14,6 +15,9 @@ import numpy as np
 def fix_seed(seed: int = 42) -> None:
     '''
     Fixes the seed for reproducibility.
+
+    Args:
+        seed (int): The seed to use.
     '''
     torch.manual_seed(seed)
     random.seed(seed)
@@ -21,13 +25,13 @@ def fix_seed(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def load_fashion_mnist() -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
+def load_fashion_mnist() -> tuple[Dataset, Dataset]:
     '''
     Loads the Fashion MNIST dataset.
 
     Returns:
-        train_dataset (torch.utils.data.Dataset): The training set.
-        test_dataset (torch.utils.data.Dataset): The test set.
+        train_dataset (Dataset): The training set.
+        test_dataset (Dataset): The test set.
     '''
     transform = torchvision.transforms.Compose([
         torchvision.transforms.ToTensor(),
@@ -47,7 +51,7 @@ def load_fashion_mnist() -> tuple[torch.utils.data.Dataset, torch.utils.data.Dat
         transform=transform,
         download=True,
     )
-    
+
     return train_dataset, test_dataset
 
 
@@ -55,6 +59,7 @@ class ResNetLayer(nn.Module):
     '''
     A single layer of the ResNet model.
     '''
+
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
         '''
         Args:
@@ -65,18 +70,22 @@ class ResNetLayer(nn.Module):
         super().__init__()
 
         # First convolutional layer
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, stride=stride,
+            padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels)
 
         # Second convolutional layer
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(out_channels, out_channels,
+                               kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         # Skip connection
         self.skip_connection = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.skip_connection = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1,
+                          stride=stride, bias=False),
                 nn.BatchNorm2d(out_channels)
             )
 
@@ -113,6 +122,7 @@ class ResNet(nn.Module):
     '''
     The ResNet model.
     '''
+
     def __init__(self, num_classes: int = 10):
         '''
         Args:
@@ -121,7 +131,8 @@ class ResNet(nn.Module):
         super().__init__()
 
         # Initial convolution layer
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=3,
+                               stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(16)
 
         # Residual layers
@@ -135,7 +146,8 @@ class ResNet(nn.Module):
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(32, num_classes)
 
-    def _make_layer(self, in_channels: int, out_channels: int, num_blocks: int, stride: int) -> nn.Sequential:
+    def _make_layer(self, in_channels: int, out_channels: int,
+                    num_blocks: int, stride: int) -> nn.Sequential:
         '''
         Makes a layer of the ResNet model.
 
@@ -182,14 +194,18 @@ class ResNet(nn.Module):
         return out
 
 
-def train_model(model: nn.Module, train_loader: torch.utils.data.DataLoader, test_loader: torch.utils.data.DataLoader, epochs: int = 10, learning_rate: float = 0.001) -> float:
+def train_model(model: nn.Module, train_loader: DataLoader,
+                test_loader: DataLoader, epochs: int = 10,
+                learning_rate: float = 0.001) -> float:
     '''
     Trains the model.
 
     Args:
         model (nn.Module): The model to train.
-        train_loader (torch.utils.data.DataLoader): The dataloader for the training set.
-        test_loader (torch.utils.data.DataLoader): The dataloader for the test set.
+        train_loader (DataLoader):
+            The dataloader for the train set.
+        test_loader (DataLoader):
+            The dataloader for the test set.
         epochs (int): The number of epochs to train for.
         learning_rate (float): The learning rate for the optimizer.
     '''
@@ -197,11 +213,15 @@ def train_model(model: nn.Module, train_loader: torch.utils.data.DataLoader, tes
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
+    # Move model to GPU if available
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
     # Train the model
     for epoch in range(epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
             # Forward pass
-            output = model(data)
+            output = model(data.to(device))
             loss = criterion(output, target)
 
             # Backward pass
@@ -213,7 +233,9 @@ def train_model(model: nn.Module, train_loader: torch.utils.data.DataLoader, tes
 
             # Print progress
             if batch_idx % 100 == 0:
-                print(f"\rEpoch {epoch} | Batch {batch_idx} | Loss {loss.item():.4f}", end="", flush=True)
+                print(
+                    f"\rEpoch {epoch} | Batch {batch_idx} | "
+                    f"Loss {loss.item():.4f}", end="", flush=True)
 
         print()
 
@@ -223,7 +245,7 @@ def train_model(model: nn.Module, train_loader: torch.utils.data.DataLoader, tes
         total = 0
         test_loss = 0
         for data, target in test_loader:
-            output = model(data)
+            output = model(data.to(device))
             _, predicted = torch.max(output.data, 1)
 
             total += target.size(0)
@@ -232,17 +254,24 @@ def train_model(model: nn.Module, train_loader: torch.utils.data.DataLoader, tes
             test_loss += criterion(output, target).item()
 
         test_loss /= len(test_loader)
-        print(f"Test loss: {test_loss:.4f} | Test accuracy: {100 * correct / total:.2f}%")
+        print(
+            f"Test loss: {test_loss:.4f} | "
+            f"Test accuracy: {100 * correct / total:.2f}%")
 
     return test_loss
 
 
-def plot_bayesian_optimization(evaluations: list[tuple[float, float]], min_lr_log: float, max_lr_log: float) -> None:
+def plot_bayesian_optimization(evaluations: list[tuple[float, float]],
+                               min_lr_log: float, max_lr_log: float) -> None:
     '''
-    Plots the Bayesian optimization process, including all observations, the posterior mean, the uncertainty estimate, and the acquisition function.
+    Plots the Bayesian optimization process, including all observations,
+    the posterior mean, the uncertainty estimate, and the acquisition function.
 
     Args:
-        evaluations (list[tuple[float, float]]): The evaluations of the function.
+        evaluations (list[tuple[float, float]]):
+            The evaluations of the function.
+        min_lr_log (float): The minimum learning rate in log10 scale.
+        max_lr_log (float): The maximum learning rate in log10 scale.
     '''
 
     # Convert evaluations to numpy arrays
@@ -250,20 +279,20 @@ def plot_bayesian_optimization(evaluations: list[tuple[float, float]], min_lr_lo
     Y_obs = np.array([loss for _, loss in evaluations])
 
     # Scale X to unit cube [0, 1] for GP
-    X_obs_scaled = (X_obs_log - min_lr_log) / (max_lr_log - min_lr_log)
+    X_obs_scaled = ((X_obs_log - min_lr_log) / (max_lr_log - min_lr_log))
 
     # Create grid of points for visualization
     X_grid_log = np.linspace(min_lr_log, max_lr_log, 1000).reshape(-1, 1)
-    X_grid_scaled = (X_grid_log - min_lr_log) / (max_lr_log - min_lr_log)
+    X_grid_scaled = ((X_grid_log - min_lr_log) / (max_lr_log - min_lr_log))
 
     # Convert to tensors for GP
     X_tensor = torch.tensor(X_obs_scaled, dtype=torch.float64)
     Y_tensor = torch.tensor(Y_obs, dtype=torch.float64).reshape(-1, 1)
-    
+
     # Store original scale parameters for later transformation
     y_mean = float(Y_tensor.mean())
-    y_std = float(Y_tensor.std()) if Y_tensor.std() > 0 else 1.0
-    
+    y_std = (float(Y_tensor.std()) if Y_tensor.std() > 0 else 1.0)
+
     # Standardize Y values
     Y_tensor_standardized = (Y_tensor - y_mean) / y_std
 
@@ -283,7 +312,8 @@ def plot_bayesian_optimization(evaluations: list[tuple[float, float]], min_lr_lo
 
     # Calculate acquisition function
     EI = LogExpectedImprovement(gp, best_f=Y_tensor_standardized.min())
-    acquisition = EI(X_grid_tensor.reshape(-1, 1, 1)).detach().numpy()
+    acquisition = (EI(X_grid_tensor.reshape(-1, 1, 1))
+                   .detach().numpy())
 
     # Create plot
     fig, (ax_gp, ax_acq) = plt.subplots(
@@ -299,13 +329,15 @@ def plot_bayesian_optimization(evaluations: list[tuple[float, float]], min_lr_lo
         mu.ravel() + 1.96 * std.ravel(),
         color='turquoise', alpha=0.4, label='95% CI'
     )
-    ax_gp.scatter(X_obs_log, Y_obs, c='red', s=40, zorder=3, label='Observations')
+    ax_gp.scatter(X_obs_log, Y_obs, c='red', s=40, zorder=3,
+                  label='Observations')
     ax_gp.set_ylabel('Loss')
     ax_gp.legend(loc='upper right')
     ax_gp.set_title('Gaussian Process and Acquisition Function')
 
     # Acquisition function plot
-    ax_acq.plot(X_grid_log, acquisition, color='purple', label='Utility Function')
+    ax_acq.plot(X_grid_log, acquisition, color='purple',
+                label='Utility Function')
     ax_acq.set_xlabel('log10(Learning Rate)')
     ax_acq.set_ylabel('Utility')
     ax_acq.legend(loc='upper right')
@@ -322,36 +354,43 @@ def sobol_sequence(n: int) -> list[float]:
         n (int): The number of points to generate.
 
     Returns:
-        sequence (list[float]): The Sobol sequence of length n in the interval [0, 1]
+        sequence (list[float]):
+            The Sobol sequence of length n in the interval [0, 1]
     '''
 
-    seq = []
+    sequence = []
     for i in range(n):
         x, f, k = 0.0, 0.5, i
         while k:
             x += f * (k & 1)   # add reversed bit
             k >>= 1            # shift right
             f *= 0.5           # next fraction
-        seq.append(x)
-    return seq
+        sequence.append(x)
+    return sequence
 
 
-def get_next_guess(evaluations: list[tuple[float, float]]) -> float:
+def get_next_guess(evaluations: list[tuple[float, float]],
+                   min_lr_log: int, max_lr_log: int) -> float:
     '''
     Gets the next guess using the GP.
 
     Args:
-        evaluations (list[tuple[float, float]]): The evaluations of the function.
+        evaluations (list[tuple[float, float]]):
+            The evaluations of the function.
+        min_lr_log (int): The minimum learning rate in log10 scale.
+        max_lr_log (int): The maximum learning rate in log10 scale.
 
     Returns:
         next_guess (float): The next guess.
     '''
     # Convert evaluations to tensors for botorch
-    X_log = torch.tensor([[torch.log10(torch.tensor(lr))] for lr, _ in evaluations], dtype=torch.float64)
-    y = torch.tensor([[loss] for _, loss in evaluations], dtype=torch.float64)
+    X_log = torch.tensor(
+        [[torch.log10(torch.tensor(lr))] for lr, _ in evaluations],
+        dtype=torch.float64)
+    y = torch.tensor(
+        [[loss] for _, loss in evaluations], dtype=torch.float64)
 
     # Scale X to unit cube [0, 1]
-    min_lr_log, max_lr_log = -6, -2
     X_scaled = (X_log - min_lr_log) / (max_lr_log - min_lr_log)
 
     # Standardize y values
@@ -370,21 +409,35 @@ def get_next_guess(evaluations: list[tuple[float, float]]) -> float:
         EI, bounds=bounds,
         q=1, num_restarts=5, raw_samples=20,
     )
-    
+
     # Convert back to learning rate scale
     candidate_log = candidate.item() * (max_lr_log - min_lr_log) + min_lr_log
     return 10 ** candidate_log
 
 
-def bayesian_lr_optimization(model_class: type[nn.Module], train_function: Callable[[nn.Module, torch.utils.data.DataLoader, torch.utils.data.DataLoader, int, float], float], train_loader: torch.utils.data.DataLoader, test_loader: torch.utils.data.DataLoader, epochs: int = 10, budget: int = 10) -> float:
+def bayesian_lr_optimization(
+        model_class: type[nn.Module],
+        train_function: Callable[[nn.Module, DataLoader,
+                                 DataLoader, int, float],
+                                 float],
+        sobol_sequence: Callable[[int], list[float]],
+        train_loader: DataLoader,
+        test_loader: DataLoader,
+        epochs: int = 10, min_lr_log: int = -6, max_lr_log: int = -2,
+        budget: int = 10, plot: bool = True) -> float:
     '''
     Bayesian Hyperparameter Optimization for the learning rate.
 
     Args:
         model_class (type[nn.Module]): The model class to optimize.
-        train_loader (torch.utils.data.DataLoader): The dataloader for the training set.
-        test_loader (torch.utils.data.DataLoader): The dataloader for the test set.
+        train_function (Callable):
+            The function to train the model.
+        train_loader (DataLoader):
+            The dataloader for the train set.
+        test_loader (DataLoader):
+            The dataloader for the test set.
         epochs (int): The number of epochs to train for.
+        min_lr_log (int): The minimum learning rate in log10 scale.
         budget (int): The number of function evaluations.
 
     Returns:
@@ -392,30 +445,32 @@ def bayesian_lr_optimization(model_class: type[nn.Module], train_function: Calla
     '''
 
     evaluations = []
-    f = lambda lr: train_function(model_class(), train_loader, test_loader, epochs, lr)
-
-    min_lr_log = -6
-    max_lr_log = -2
 
     # Get initial guesses using Sobol sequence
     sobol_seq = sobol_sequence(min(3, budget))
-    initial_guesses = [10 ** (min_lr_log + (max_lr_log - min_lr_log) * lr) for lr in sobol_seq]
+    initial_guesses = [
+        10 ** (min_lr_log + (max_lr_log - min_lr_log) * lr)
+        for lr in sobol_seq
+    ]
 
     # Evaluate initial guesses
     for lr in initial_guesses:
-        loss = f(lr)
+        loss = train_function(model_class(), train_loader, test_loader,
+                              epochs, lr)
         evaluations.append((lr, loss))
 
     # Get next guess using GP
     while len(evaluations) < budget:
 
-        plot_bayesian_optimization(evaluations, min_lr_log, max_lr_log)
+        if plot:
+            plot_bayesian_optimization(evaluations, min_lr_log, max_lr_log)
 
         # Get next guess using GP
-        next_guess = get_next_guess(evaluations)
+        next_guess = get_next_guess(evaluations, min_lr_log, max_lr_log)
 
         # Evaluate next guess
-        loss = f(next_guess)
+        loss = train_function(model_class(), train_loader, test_loader,
+                              epochs, next_guess)
         evaluations.append((next_guess, loss))
 
     best_lr = min(evaluations, key=lambda x: x[1])[0]
@@ -426,18 +481,26 @@ if __name__ == "__main__":
     # Load data
     print("Loading data...")
     train_dataset_full, test_dataset = load_fashion_mnist()
-    train_dataset, train_dataset_val = torch.utils.data.random_split(train_dataset_full, [0.8, 0.2])
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
-    train_loader_val = torch.utils.data.DataLoader(train_dataset_val, batch_size=128, shuffle=False)
-    train_loader_full = torch.utils.data.DataLoader(train_dataset_full, batch_size=128, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False)
+    train_dataset, train_dataset_val = random_split(
+        train_dataset_full, [0.8, 0.2])
+    train_loader = DataLoader(
+        train_dataset, batch_size=128, shuffle=True)
+    train_loader_val = DataLoader(
+        train_dataset_val, batch_size=128, shuffle=False)
+    train_loader_full = DataLoader(
+        train_dataset_full, batch_size=128, shuffle=True)
+    test_loader = DataLoader(
+        test_dataset, batch_size=128, shuffle=False)
 
     # Optimize learning rate
     print("Optimizing learning rate...")
-    best_lr = bayesian_lr_optimization(ResNet, train_model, train_loader, train_loader_val, epochs=10, budget=10)
+    best_lr = bayesian_lr_optimization(
+        ResNet, train_model, train_loader, train_loader_val,
+        epochs=10, budget=10)
     print(f"Best learning rate: {best_lr}")
 
     # Train model with best learning rate on full training set
     print("Training model with best learning rate on full training set...")
     model = ResNet()
-    result_loss = train_model(model, train_loader_full, test_loader, epochs=10, learning_rate=best_lr)
+    result_loss = train_model(model, train_loader_full, test_loader,
+                              epochs=10, learning_rate=best_lr)
